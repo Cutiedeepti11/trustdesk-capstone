@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>TrustDesk - AI Support Operations</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-100 font-sans p-6">
+    <div class="max-w-6xl mx-auto space-y-6">
+        <header class="border-b pb-4 flex justify-between items-center">
+            <h1 class="text-2xl font-bold text-slate-800">TrustDesk Operations Console</h1>
+            <span class="text-xs bg-emerald-100 text-emerald-800 font-semibold px-2.5 py-1 rounded">Live Agent</span>
+        </header>
+
+        <div class="grid grid-cols-3 gap-6">
+            <!-- Ticket Queue -->
+            <div class="bg-white p-4 rounded-lg shadow-sm">
+                <h2 class="font-bold text-slate-700 mb-3">Ticket Queue</h2>
+                <div id="ticketList" class="space-y-2 max-h-[550px] overflow-y-auto text-sm">Loading...</div>
+            </div>
+
+            <!-- Ticket Context & AI Review -->
+            <div class="col-span-2 space-y-4">
+                <div class="bg-white p-5 rounded-lg shadow-sm">
+                    <h2 class="font-bold text-slate-800 mb-2" id="ticketSubject">Select a ticket from the queue</h2>
+                    <p class="text-sm text-slate-600 mb-4 whitespace-pre-wrap" id="ticketBody">-</p>
+                    <div class="grid grid-cols-2 text-xs bg-slate-50 p-3 rounded mb-4">
+                        <div><strong>Customer Tier:</strong> <span id="custTier">-</span></div>
+                        <div><strong>Order Status:</strong> <span id="ordStatus">-</span></div>
+                    </div>
+                    <button onclick="triggerTriage()" id="btnTriage" disabled class="bg-indigo-600 disabled:opacity-50 text-white px-4 py-2 text-sm rounded font-medium">Run AI Triage</button>
+                </div>
+
+                <!-- Triage Results & Approval Gate -->
+                <div id="triageBox" class="bg-white p-5 rounded-lg shadow-sm hidden space-y-4">
+                    <h3 class="font-bold text-slate-800 border-b pb-2">AI Assessment</h3>
+                    <div class="grid grid-cols-3 gap-2 text-xs">
+                        <div>Category: <span class="font-bold" id="resCategory"></span></div>
+                        <div>Priority: <span class="font-bold" id="resPriority"></span></div>
+                        <div>Needs Escalation: <span class="font-bold" id="resEscalation"></span></div>
+                    </div>
+                    <div>
+                        <div class="text-xs font-semibold text-slate-600 mb-1">Generated Draft Response:</div>
+                        <div id="resDraft" class="bg-slate-50 border p-3 rounded text-sm text-slate-700 whitespace-pre-wrap"></div>
+                    </div>
+
+                    <div id="approvalSection" class="p-4 bg-amber-50 border border-amber-200 rounded hidden">
+                        <div class="flex justify-between items-center">
+                            <div>
+                                <p class="text-xs font-bold text-amber-800 uppercase tracking-wide">Sensitive Action Recommended</p>
+                                <p class="text-sm font-semibold text-slate-800" id="actionName"></p>
+                            </div>
+                            <button onclick="executeApproval()" class="bg-emerald-600 text-white text-xs px-3 py-2 rounded font-bold hover:bg-emerald-700">Approve Action</button>
+                        </div>
+                        <p id="approvalFeedback" class="text-xs font-semibold text-emerald-700 mt-2"></p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let selectedTicket = null;
+        let activeIdempotencyKey = null;
+
+        async function fetchTickets() {
+            const res = await fetch('/api/tickets');
+            const data = await res.json();
+            const list = document.getElementById('ticketList');
+            list.innerHTML = '';
+            data.forEach(t => {
+                const el = document.createElement('div');
+                el.className = "p-3 border rounded cursor-pointer hover:bg-slate-50";
+                el.innerHTML = `<strong>${t.id}</strong><p class="truncate text-xs text-slate-500">${t.subject}</p>`;
+                el.onclick = () => selectTicket(t.id);
+                list.appendChild(el);
+            });
+        }
+
+        async function selectTicket(id) {
+            const res = await fetch(`/api/tickets/${id}`);
+            selectedTicket = await res.json();
+            document.getElementById('ticketSubject').innerText = `[${selectedTicket.ticket.id}] ${selectedTicket.ticket.subject}`;
+            document.getElementById('ticketBody').innerText = selectedTicket.ticket.body;
+            document.getElementById('custTier').innerText = selectedTicket.customer.tier || 'Standard';
+            document.getElementById('ordStatus').innerText = selectedTicket.order.status || 'N/A';
+            document.getElementById('btnTriage').disabled = false;
+            document.getElementById('triageBox').classList.add('hidden');
+        }
+
+        async function triggerTriage() {
+            const payload = {
+                ticket_id: selectedTicket.ticket.id,
+                ticket_text: selectedTicket.ticket.body,
+                customer_context: selectedTicket.customer,
+                order_context: selectedTicket.order,
+                created_at: selectedTicket.ticket.created_at
+            };
+            const res = await fetch('/api/triage', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(payload)
+            });
+            const data = await res.json();
+            document.getElementById('triageBox').classList.remove('hidden');
+            document.getElementById('resCategory').innerText = data.triage.category;
+            document.getElementById('resPriority').innerText = data.triage.priority;
+            document.getElementById('resEscalation').innerText = data.triage.needs_escalation;
+            document.getElementById('resDraft').innerText = data.triage.draft_reply;
+
+            const appSec = document.getElementById('approvalSection');
+            if (data.approval_idempotency_key) {
+                activeIdempotencyKey = data.approval_idempotency_key;
+                document.getElementById('actionName').innerText = data.triage.suggested_action;
+                document.getElementById('approvalFeedback').innerText = '';
+                appSec.classList.remove('hidden');
+            } else {
+                appSec.classList.add('hidden');
+            }
+        }
+
+        async function executeApproval() {
+            const res = await fetch(`/api/tickets/${selectedTicket.ticket.id}/approve`, {
+                method: 'POST',
+                headers: {'idempotency-key': activeIdempotencyKey}
+            });
+            const data = await res.json();
+            document.getElementById('approvalFeedback').innerText = data.message || `Action ${data.executed_action} completed.`;
+        }
+
+        fetchTickets();
+    </script>
+</body>
+</html>
